@@ -6,6 +6,7 @@ from xgboost import XGBRegressor
 from sklearn.multioutput import MultiOutputRegressor
 import pickle
 import json
+import matplotlib.pyplot as plt
 
 def train_and_save_model(data_path='vsc_hvdc_dataset.csv'):
     # Load the data
@@ -20,27 +21,26 @@ def train_and_save_model(data_path='vsc_hvdc_dataset.csv'):
                 'max': float(df[col].max())
             }
     
-    # Scale the numerical columns
-    cols_to_scale = ['scenario_P1', 'scenario_Qg1', 'scenario_Qg2', 'scenario_AC1_Nom_1', 'scenario_AC1_Nom_2', 'scenario_AC1_Nom_3', 'scenario_AC1_Nom_4', 'scenario_AC1_Nom_5', 'scenario_AC2_Nom_1', 'scenario_AC2_Nom_2', 'scenario_AC2_Nom_3', 'scenario_AC2_Nom_4', 'scenario_AC2_Nom_5', 'scenario_DC_Nom_2', 'solution_N_vw1', 'solution_N_vw2', 'solution_Qcab1_interm', 'solution_Qcab2_interm', 'solution_Qf1_interm', 'solution_Qf2', 'solution_Rdc', 'solution_Vac1', 'solution_Vac2', 'solution_Vdc1', 'solution_w1', 'solution_w2']
-    
-    scaler = MinMaxScaler(feature_range=(-1, 1))
-    df[cols_to_scale] = scaler.fit_transform(df[cols_to_scale])
-    
     # Separate features and target
     X = df.filter(regex='^scenario_', axis=1)
     y = df.filter(regex='^solution_', axis=1)
     
+    # Scale the input and output columns separately
+    input_scaler = MinMaxScaler(feature_range=(-1, 1))
+    output_scaler = MinMaxScaler(feature_range=(-1, 1))
+    
+    X_scaled = input_scaler.fit_transform(X)
+    y_scaled = output_scaler.fit_transform(y)
+    
     # Split the data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=37)
+    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_scaled, test_size=0.2, random_state=37)
     
     # Train XGBoost model
-    xgb_model = MultiOutputRegressor(
-        XGBRegressor(
-            n_estimators=100,
-            learning_rate=0.1,
-            random_state=37,
-            n_jobs=-1  # Use all available cores
-        )
+    xgb_model = XGBRegressor(
+        n_estimators=100,
+        learning_rate=0.1,
+        random_state=37,
+        n_jobs=-1  # Use all available cores
     )
     
     print("Training model...")
@@ -52,27 +52,67 @@ def train_and_save_model(data_path='vsc_hvdc_dataset.csv'):
     with open('xgb_model.pkl', 'wb') as f:
         pickle.dump(xgb_model, f)
     
-    with open('scaler.pkl', 'wb') as f:
-        pickle.dump(scaler, f)
+    with open('input_scaler.pkl', 'wb') as f:
+        pickle.dump(input_scaler, f)
+
+    with open('output_scaler.pkl', 'wb') as f:
+        pickle.dump(output_scaler, f)
     
     with open('feature_ranges.json', 'w') as f:
         json.dump(feature_ranges, f)
     
     print("Model files saved successfully!")
     
-    # Calculate and print metrics
-    y_pred = xgb_model.predict(X_test)
+    # Calculate and print metrics for both training and test sets
+    y_train_pred = xgb_model.predict(X_train)
+    y_test_pred = xgb_model.predict(X_test)
     
     print("\nModel Performance:")
+    accuracy_df = {}
+
     for i, col in enumerate(y.columns):
-        mse = np.mean((y_test.iloc[:, i] - y_pred[:, i]) ** 2)
-        rmse = np.sqrt(mse)
-        r2 = 1 - (np.sum((y_test.iloc[:, i] - y_pred[:, i]) ** 2) / 
-                  np.sum((y_test.iloc[:, i] - y_test.iloc[:, i].mean()) ** 2))
+        # Training metrics
+        train_mse = np.mean((y_train[:, i] - y_train_pred[:, i]) ** 2)
+        train_rmse = np.sqrt(train_mse)
+        train_r2 = 1 - (np.sum((y_train[:, i] - y_train_pred[:, i]) ** 2) / np.sum((y_train[:, i] - np.mean(y_train[:, i])) ** 2))
+        
+        # Test metrics
+        test_mse = np.mean((y_test[:, i] - y_test_pred[:, i]) ** 2)
+        test_rmse = np.sqrt(test_mse)
+        test_r2 = 1 - (np.sum((y_test[:, i] - y_test_pred[:, i]) ** 2) / np.sum((y_test[:, i] - np.mean(y_test[:, i])) ** 2))
+        
+        accuracy_df[col] = [train_mse, train_r2, test_rmse, test_r2]
         
         print(f"\n{col}:")
-        print(f"RMSE: {rmse:.4f}")
-        print(f"R²: {r2:.4f}")
+        print(f"Training RMSE: {train_rmse:.4f}")
+        print(f"Training R²: {train_r2:.4f}")
+        print(f"Test RMSE: {test_rmse:.4f}")
+        print(f"Test R²: {test_r2:.4f}")
+    
+    # Convert the accuracy dictionary to a DataFrame for easier manipulation
+    accuracy_df = pd.DataFrame(accuracy_df, index=['Train RMSE', 'Train R²', 'Test RMSE', 'Test R²']).T
+
+    # Save the accuracy_df DataFrame to a CSV file
+    accuracy_df.to_csv('model_accuracy_metrics.csv', index=True)
+
+    # plotting the accuracy metrics
+    plt.figure(figsize=(12, 6))
+    # Set bar width
+    bar_width = 0.35
+    x = np.arange(len(accuracy_df.index))  # the label locations
+
+    # Plot RMSE
+    plt.bar(x - bar_width/2, accuracy_df['Train RMSE'], width=bar_width, label='Train RMSE', alpha=0.7)
+    plt.bar(x + bar_width/2, accuracy_df['Test RMSE'], width=bar_width, label='Test RMSE', alpha=0.7)
+    plt.title('RMSE Comparison')
+    plt.ylabel('RMSE')
+    plt.xticks(x, accuracy_df.index, rotation=45)
+    plt.legend()
+
+    # Show the plots
+    plt.tight_layout()
+    plt.show()
+
 
 if __name__ == "__main__":
     train_and_save_model()
